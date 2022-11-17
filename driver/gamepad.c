@@ -39,6 +39,13 @@ enum gip_gamepad_button {
 	GIP_GP_BTN_STICK_R = BIT(15),
 };
 
+enum gip_gamepad_paddles {
+	GIP_GP_BTN_PADDLE_1 = BIT(0),
+	GIP_GP_BTN_PADDLE_2 = BIT(1),
+	GIP_GP_BTN_PADDLE_3 = BIT(2),
+	GIP_GP_BTN_PADDLE_4 = BIT(3),
+};
+
 enum gip_gamepad_motor {
 	GIP_GP_MOTOR_R = BIT(0),
 	GIP_GP_MOTOR_L = BIT(1),
@@ -54,6 +61,11 @@ struct gip_gamepad_pkt_input {
 	__le16 stick_left_y;
 	__le16 stick_right_x;
 	__le16 stick_right_y;
+} __packed;
+
+struct gip_gamepad_pkt_paddle_elite2_oldfw {
+	u8 paddles;
+	u8 profile;
 } __packed;
 
 struct gip_gamepad_pkt_series_xs {
@@ -80,6 +92,7 @@ struct gip_gamepad {
 	struct gip_input input;
 
 	bool series_xs;
+	bool series_elite2;
 
 	struct gip_gamepad_rumble {
 		/* serializes access to rumble packet */
@@ -168,6 +181,17 @@ static bool gip_gamepad_is_series_xs(struct gip_client *client)
 	return false;
 }
 
+static bool gip_gamepad_is_elite_series_2(struct gip_client* client)
+{
+	struct gip_hardware* hw = &client->hardware;
+
+	if (hw->vendor == GIP_GP_VID_MICROSOFT &&
+		hw->product == GIP_GP_PID_ELITE2)
+		return true;
+
+	return false;
+}
+
 static int gip_gamepad_init_input(struct gip_gamepad *gamepad)
 {
 	struct input_dev *dev = gamepad->input.dev;
@@ -177,6 +201,8 @@ static int gip_gamepad_init_input(struct gip_gamepad *gamepad)
 	if (gamepad->series_xs)
 		input_set_capability(dev, EV_KEY, KEY_RECORD);
 
+	gamepad->series_elite2 = gip_gamepad_is_elite_series_2(gamepad->client);
+	
 	input_set_capability(dev, EV_KEY, BTN_MODE);
 	input_set_capability(dev, EV_KEY, BTN_START);
 	input_set_capability(dev, EV_KEY, BTN_SELECT);
@@ -188,6 +214,12 @@ static int gip_gamepad_init_input(struct gip_gamepad *gamepad)
 	input_set_capability(dev, EV_KEY, BTN_TR);
 	input_set_capability(dev, EV_KEY, BTN_THUMBL);
 	input_set_capability(dev, EV_KEY, BTN_THUMBR);
+	if (gamepad->series_elite2) {
+		input_set_capability(dev, EV_KEY, BTN_TRIGGER_HAPPY5); /* paddle upper right */
+		input_set_capability(dev, EV_KEY, BTN_TRIGGER_HAPPY6); /* paddle lower right */
+		input_set_capability(dev, EV_KEY, BTN_TRIGGER_HAPPY7); /* paddle upper left */
+		input_set_capability(dev, EV_KEY, BTN_TRIGGER_HAPPY8); /* paddle lower left */
+	}
 	input_set_abs_params(dev, ABS_X, -32768, 32767, 16, 128);
 	input_set_abs_params(dev, ABS_RX, -32768, 32767, 16, 128);
 	input_set_abs_params(dev, ABS_Y, -32768, 32767, 16, 128);
@@ -244,6 +276,7 @@ static int gip_gamepad_op_input(struct gip_client *client, void *data, u32 len)
 {
 	struct gip_gamepad *gamepad = dev_get_drvdata(&client->dev);
 	struct gip_gamepad_pkt_input *pkt = data;
+	struct gip_gamepad_pkt_paddle_elite2_oldfw *pkt_elite2 = data + sizeof(*pkt);
 	struct gip_gamepad_pkt_series_xs *pkt_xs = data + sizeof(*pkt);
 	struct input_dev *dev = gamepad->input.dev;
 	u16 buttons = le16_to_cpu(pkt->buttons);
@@ -256,6 +289,24 @@ static int gip_gamepad_op_input(struct gip_client *client, void *data, u32 len)
 			return -EINVAL;
 
 		input_report_key(dev, KEY_RECORD, !!pkt_xs->share_button);
+	}
+
+	if (gamepad->series_elite2) {
+		if (len < sizeof(*pkt) + sizeof(*pkt_elite2))
+			return -EINVAL;
+		
+		/* Mute paddles if controller is in a custom profile slot
+		 * Checked by looking at the active profile slot to
+		 * verify it's the default slot
+		 * Works only on older reverted FW
+		 */
+		if (pkt_elite2->profile != 0)
+			pkt_elite2->paddles = 0;
+		
+		input_report_key(dev, BTN_TRIGGER_HAPPY5, pkt_elite2->paddles & GIP_GP_BTN_PADDLE_1);
+		input_report_key(dev, BTN_TRIGGER_HAPPY6, pkt_elite2->paddles & GIP_GP_BTN_PADDLE_2);
+		input_report_key(dev, BTN_TRIGGER_HAPPY7, pkt_elite2->paddles & GIP_GP_BTN_PADDLE_3);
+		input_report_key(dev, BTN_TRIGGER_HAPPY8, pkt_elite2->paddles & GIP_GP_BTN_PADDLE_4);
 	}
 
 	input_report_key(dev, BTN_START, buttons & GIP_GP_BTN_MENU);
